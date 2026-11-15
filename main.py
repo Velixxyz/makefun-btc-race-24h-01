@@ -7,15 +7,18 @@ by a hair, then rides the move with a trailing stop that gives back half a
 percent from the best close seen since entry. It never shorts, never uses
 leverage, never trades more than once per minute, and it waits two hours
 before its first trade so the one-hour window it reads is properly formed
-instead of a fragment of the day's open.
+instead of a fragment of the day's open. After a stop-out it sits out for
+30 bars: the breakout failed, so paying another ~40 bps to re-enter the
+same failed move is the classic whipsaw tax, and the bot refuses to pay it.
 
-Four numbers, all round: a 60-bar (one-hour) breakout window, a 5-basis-point
+Five numbers, all round: a 60-bar (one-hour) breakout window, a 5-basis-point
 buffer above the old high so a mere touch does not trigger it, a 0.50%
-trailing stop, and a 120-bar minimum history. On the dev window that earned
-+18.66 USDC on 1,000 USDC with three round trips, a worst drawdown of 1.38%,
-and two small losing trades against one +3% rally trade. That is the honest
-shape of it: trend following lives or dies on whether the race window has a
-leg like that, and no parameter here pretends otherwise.
+trailing stop, a 120-bar minimum history, and a 30-bar re-entry cooldown
+after a stop-out. On the dev window that earned +18.66 USDC on 1,000 USDC
+with three round trips, a worst drawdown of 1.38%, and two small losing
+trades against one +3% rally trade. That is the honest shape of it: trend
+following lives or dies on whether the race window has a leg like that,
+and no parameter here pretends otherwise.
 
 Everything is integer arithmetic on the prices the harness sends, no clock,
 no network, no file reads, no randomness: the same bars always produce the
@@ -33,6 +36,7 @@ LOOKBACK = 60            # bars in the breakout window (one hour of 1m bars)
 MIN_HISTORY = 120       # bars before the first trade (two hours of history)
 BUFFER_BPS = 5           # breakout must clear the old high by this much
 TRAIL_BPS = 50           # trailing stop: 0.50% below the peak close since entry
+COOLDOWN_BARS = 30       # bars to sit out after a stop-out before a new entry
 MAX_SLIPPAGE_BPS = 100   # 1%: far above the ~15 bps a full-size fill moves
 
 
@@ -41,6 +45,7 @@ class Hourglass:
         self.closes = []   # every close seen, in order
         self.highs = []    # every bar high seen, in order
         self.peak = 0      # best close since the current entry (0 when flat)
+        self.cooldown_until = 0  # bar count until which new entries are blocked
 
     def on_batch(self, state, batch):
         bar = None
@@ -67,6 +72,9 @@ class Hourglass:
                 self.peak = close
             if close * 10000 <= self.peak * (10000 - TRAIL_BPS):
                 self.peak = 0
+                # The breakout failed: sit out a while instead of paying
+                # another ~40 bps to re-enter the same failed move.
+                self.cooldown_until = len(self.closes) + COOLDOWN_BARS
                 return [{
                     "side": "sell",
                     "symbol": SYMBOL,
@@ -78,6 +86,8 @@ class Hourglass:
         # Flat: reset the peak and look for a breakout of the last hour's high.
         self.peak = 0
         if len(self.closes) <= MIN_HISTORY:
+            return []
+        if len(self.closes) <= self.cooldown_until:
             return []
         window = self.highs[-LOOKBACK - 1:-1]  # previous 60 bars, not this one
         if len(window) < LOOKBACK:
